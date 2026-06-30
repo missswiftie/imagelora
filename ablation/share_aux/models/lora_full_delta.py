@@ -98,7 +98,9 @@ class FullDeltaLoRAModule(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_dtype = hidden_states.dtype
         dtype = self.weight_embedding.dtype
-        org_out = self.org_forward(hidden_states)
+        # UNet 权重冻结，base 分支不需要反传，可大幅节省 backward 显存
+        with torch.no_grad():
+            org_out = self.org_forward(hidden_states)
         delta_out = self._delta_linear(hidden_states.to(dtype), self.weight_embedding)
 
         if self.network_alpha is not None:

@@ -116,12 +116,64 @@ def update_lora_weights(network, weight_list):
 
 def enable_memory_savings(unet, vae, cfg):
     if cfg.get("enable_attention_slicing", True):
+        slice_mode = cfg.get("attention_slice_size", "max")
         if hasattr(unet, "set_attention_slice"):
-            unet.set_attention_slice("auto")
+            unet.set_attention_slice(slice_mode)
         elif hasattr(unet, "enable_attention_slicing"):
-            unet.enable_attention_slicing()
+            unet.enable_attention_slicing(slice_mode if slice_mode != "max" else 1)
+    if cfg.get("enable_xformers", True):
+        try:
+            unet.enable_xformers_memory_efficient_attention()
+        except Exception as exc:
+            logger.warning(f"xFormers unavailable, skip: {exc}")
     if cfg.get("enable_vae_slicing", True) and hasattr(vae, "enable_slicing"):
         vae.enable_slicing()
+    if cfg.get("enable_vae_tiling", False) and hasattr(vae, "enable_tiling"):
+        vae.enable_tiling()
+
+
+def maybe_offload(*modules):
+    for module in modules:
+        module.to("cpu")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def maybe_onload(module, device, dtype=None):
+    if dtype is None:
+        module.to(device)
+    else:
+        module.to(device, dtype=dtype)
+
+
+def encode_batch(cfg, device, weight_dtype, image_encoder, vae, text_encoder, tokenizer, ref_images, tgt_images, captions):
+    cpu_offload = cfg.get("cpu_offload_encoders", True)
+
+    with torch.no_grad():
+        maybe_onload(image_encoder, device, weight_dtype if cfg.get("dinov2_fp16", True) else torch.float32)
+        ref_features = image_encoder.encode(ref_images)
+        if cpu_offload:
+            maybe_offload(image_encoder)
+
+    del ref_images
+
+    with torch.no_grad():
+        maybe_onload(vae, device, weight_dtype)
+        latents = vae.encode(tgt_images).latent_dist.sample() * vae.config.scaling_factor
+        if cpu_offload:
+            maybe_offload(vae)
+
+        maybe_onload(text_encoder, device, weight_dtype)
+        text_inputs = tokenizer(
+            captions, padding="max_length",
+            max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt",
+        )
+        encoder_hidden_states = text_encoder(text_inputs.input_ids.to(device))[0]
+        if cpu_offload:
+            maybe_offload(text_encoder)
+
+    del tgt_images
+    return ref_features, latents, encoder_hidden_states
 
 
 def main():
@@ -222,11 +274,17 @@ def main():
         hypernetwork, optimizer, train_dataloader, lr_scheduler,
     )
     network.to(accelerator.device)
-
-    vae.to(accelerator.device, dtype=weight_dtype)
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
-    image_encoder.to(accelerator.device, dtype=weight_dtype if cfg.get("dinov2_fp16", True) else torch.float32)
+
+    encoder_dtype = weight_dtype if cfg.get("dinov2_fp16", True) else torch.float32
+    if cfg.get("cpu_offload_encoders", True):
+        vae.to("cpu", dtype=weight_dtype)
+        text_encoder.to("cpu", dtype=weight_dtype)
+        image_encoder.to("cpu", dtype=encoder_dtype)
+    else:
+        vae.to(accelerator.device, dtype=weight_dtype)
+        text_encoder.to(accelerator.device, dtype=weight_dtype)
+        image_encoder.to(accelerator.device, dtype=encoder_dtype)
 
     global_step = 0
     if cfg.get("resume_from_checkpoint"):
@@ -254,23 +312,19 @@ def main():
 
         for batch in train_dataloader:
             with accelerator.accumulate(network, hypernetwork):
-                ref_images = batch["ref_image"].to(accelerator.device)
-                tgt_images = batch["tgt_image"].to(accelerator.device, dtype=weight_dtype)
+                ref_images = batch["ref_image"].to(accelerator.device, non_blocking=True)
+                tgt_images = batch["tgt_image"].to(accelerator.device, dtype=weight_dtype, non_blocking=True)
 
-                with torch.no_grad():
-                    ref_features = image_encoder.encode(ref_images)
-                del ref_images
-                _, weight_list = hypernetwork(ref_features.float())
+                ref_features, latents, encoder_hidden_states = encode_batch(
+                    cfg, accelerator.device, weight_dtype,
+                    image_encoder, vae, text_encoder, tokenizer,
+                    ref_images, tgt_images, batch["caption"],
+                )
+                with accelerator.autocast():
+                    _, weight_list = hypernetwork(ref_features)
                 del ref_features
                 update_lora_weights(network, weight_list)
-
-                with torch.no_grad():
-                    latents = vae.encode(tgt_images).latent_dist.sample() * vae.config.scaling_factor
-                    text_inputs = tokenizer(
-                        batch["caption"], padding="max_length",
-                        max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt",
-                    )
-                    encoder_hidden_states = text_encoder(text_inputs.input_ids.to(accelerator.device))[0]
+                del weight_list
 
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
@@ -278,12 +332,18 @@ def main():
                     0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device,
                 ).long()
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states).sample
 
                 target = noise if noise_scheduler.config.prediction_type == "epsilon" else noise_scheduler.get_velocity(
                     latents, noise, timesteps,
                 )
+                del latents
+
+                with accelerator.autocast():
+                    model_pred = unet(
+                        noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states,
+                    ).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                del noisy_latents, encoder_hidden_states, timesteps, noise, target, model_pred
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
