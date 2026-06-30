@@ -1,0 +1,6 @@
+#!/bin/bash
+# 在 CentOS 7 等旧 glibc 系统上运行 conda Python（PyTorch 需要 GLIBC_2.28+）
+REAL_PYTHON="/scratch/jiaqi/anaconda3/envs/image2lora/bin/python"
+exec /scratch/jiaqi/glibc-2.34/lib/ld-linux-x86-64.so.2 \
+    --library-path /scratch/jiaqi/glibc-2.34/lib:/scratch/jiaqi/anaconda3/envs/image2lora/lib:/lib64 \
+    "${REAL_PYTHON}" "$@"

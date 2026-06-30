@@ -1,0 +1,42 @@
+# Ablation: Hypernet 直接预测每层 rank-1 全量 ΔW (A|B, dim=in+out)，无 aux
+
+pretrained_model_name_or_path: "pretrained_models/stable-diffusion-v1-5"
+
+train_data_meta: "data/metadata.jsonl"
+train_data_dir: "sampled_100styles_150pairs_package"
+resolution: 512
+max_samples: 15000
+
+rank: 1
+network_alpha: 1.0
+
+decoder_blocks: 8
+sample_iters: 4
+dinov2_model: "dinov2_vitb14"
+dinov2_model_path: "pretrained_models/dinov2-base"
+
+output_dir: "ablation/share_aux/outputs/full_delta"
+seed: 42
+train_batch_size: 4               # 每卡 batch（非全局）；5卡×4×2=40 等效 batch
+gradient_accumulation_steps: 2    # 对比 baseline 单卡 16，多卡下并不偏小
+num_train_epochs: 10
+max_train_steps: -1
+learning_rate: 1.0e-4
+lr_scheduler: "cosine"
+lr_warmup_steps: 500
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1.0e-8
+max_grad_norm: 1.0
+mixed_precision: "fp16"
+gradient_checkpointing: true
+enable_attention_slicing: true   # UNet 按 slice 算 attention，降低峰值显存
+enable_vae_slicing: true         # VAE encode 分块
+dinov2_fp16: true                 # 冻结 DINO 用 fp16 推理
+text_drop_ratio: 0.1
+
+logging_steps: 50
+checkpointing_steps: 1000
+checkpoints_total_limit: 5
+report_to: "tensorboard"

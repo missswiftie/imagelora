@@ -4,6 +4,8 @@ outputs/
 pretrained_models/
 i2l_sd15/
 sampled_100styles_150pairs_package/
+dataset/
+dataset/cache/
 
 # 参考代码（可选，体积较大）
 Video2LoRA/
@@ -13,7 +15,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+OmniStyle*
 
 # 环境
 .env
 *.log
+style*
+dataset*

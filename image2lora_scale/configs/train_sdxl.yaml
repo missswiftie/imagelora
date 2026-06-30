@@ -1,0 +1,58 @@
+# Image2LoRA SDXL scale-up 训练配置 (v2: 增强 Hypernetwork + 风格防塌缩)
+
+pretrained_model_name_or_path: "pretrained_models/stable-diffusion-xl-base-1.0"
+
+train_data_json: "dataset/omnistyle_150k.json"
+train_data_dir: "dataset"
+resolution: 1024
+require_files_exist: true
+max_samples: -1
+
+# LightLoRA (SDXL 420 层)
+rank: 2
+network_alpha: 2.0
+down_dim: 128
+up_dim: 64
+
+# Hypernetwork (加大容量，保留完整 DINO patch)
+decoder_blocks: 20
+sample_iters: 5
+style_embed_dim: 256
+dinov2_model: "dinov2_vitb14"
+dinov2_model_path: "pretrained_models/dinov2-base"
+
+style_feature_cache: "dataset/cache/style_features.pt"
+text_embedding_cache: "dataset/cache/text_embeddings.pt"
+
+# 训练
+output_dir: "outputs/image2lora_sdxl_v2"
+seed: 42
+train_batch_size: 8               # 每卡 batch 减小，减轻风格梯度平均
+gradient_accumulation_steps: 2    # 5卡×8×2=80 等效 batch，与之前相同
+num_train_epochs: 999
+max_train_steps: 16000
+learning_rate: 6.0e-5
+lr_scheduler: "cosine"
+lr_warmup_steps: 1000
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1.0e-8
+max_grad_norm: 1.0
+mixed_precision: "bf16"
+gradient_checkpointing: true
+text_drop_ratio: 0.1
+
+# 风格防塌缩辅助 loss
+style_contrastive_weight: 0.1
+weight_diversity_weight: 0.02
+style_separation_weight: 0.02
+style_contrastive_temperature: 0.07
+style_separation_margin: 0.2
+
+logging_steps: 50
+checkpointing_steps: 1000
+checkpoints_total_limit: 5
+report_to: "tensorboard"
+
+dataloader_num_workers: 8
